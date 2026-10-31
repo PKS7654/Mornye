@@ -29,6 +29,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -38,7 +40,9 @@ jobs:
 
       - name: Activate pinned Rust toolchain
         working-directory: rust_backend
-        run: rustup show
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android armv7-linux-androideabi || true
 
       - name: Install Rust dependencies
         run: |
