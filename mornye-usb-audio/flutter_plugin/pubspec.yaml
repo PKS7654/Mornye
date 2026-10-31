@@ -1,0 +1,19 @@
+name: mornye_usb_audio
+description: High-performance Bit-Perfect USB Audio Class (UAC1/UAC2) driver plugin for Mornye.
+version: 1.0.0
+homepage: https://github.com/mornyeapp/Mornye
+
+environment:
+  sdk: '>=2.18.0 <4.0.0'
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.mornye.usbaudio
+        pluginClass: UsbAudioPlugin

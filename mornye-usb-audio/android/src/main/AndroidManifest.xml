@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.mornye.usbaudio">
+
+    <!-- USB Host API permission for direct bit-perfect communication with DACs -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+</manifest>
