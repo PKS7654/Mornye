@@ -306,17 +306,6 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
         output?.shutdown()
         output?.destroy()
         output = null
-        try {
-            val dev = connection?.device
-            if (dev != null) {
-                for (i in 0 until dev.interfaceCount) {
-                    val intf = dev.getInterface(i)
-                    if (intf.interfaceClass == 1) {
-                        connection?.releaseInterface(intf)
-                    }
-                }
-            }
-        } catch (_: Exception) {}
         connection?.close()
         connection = null
         emit(mapOf("token" to token, "event" to "paused", "reason" to "route_changed"))
@@ -327,17 +316,6 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
         output?.shutdown()
         output?.destroy()
         output = null
-        try {
-            val dev = connection?.device
-            if (dev != null) {
-                for (i in 0 until dev.interfaceCount) {
-                    val intf = dev.getInterface(i)
-                    if (intf.interfaceClass == 1) {
-                        connection?.releaseInterface(intf)
-                    }
-                }
-            }
-        } catch (_: Exception) {}
         connection?.close()
         connection = null
         deviceId = null
