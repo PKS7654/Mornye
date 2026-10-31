@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB Audio Class 1.0 & 2.0 (Class 1) -->
+    <usb-device class="1" />
+    <!-- Apple USB-C EarPods & Dongles (Vendor ID 0x05AC = 1452) -->
+    <usb-device vendor-id="1452" />
+</resources>

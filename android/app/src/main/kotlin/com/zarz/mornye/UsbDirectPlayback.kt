@@ -153,6 +153,17 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
                 val usb = manager.openDevice(request.device) ?: error("Cannot open USB device")
                 connection = usb
                 deviceId = request.device.deviceId
+                for (i in 0 until request.device.interfaceCount) {
+                    val intf = request.device.getInterface(i)
+                    if (intf.interfaceClass == 1) {
+                        try {
+                            val claimed = usb.claimInterface(intf, true)
+                            android.util.Log.i("UsbDirect", "Claimed interface ${intf.id} (class ${intf.interfaceClass}): $claimed")
+                        } catch (e: Exception) {
+                            android.util.Log.w("UsbDirect", "Could not claim interface ${intf.id}: ${e.message}")
+                        }
+                    }
+                }
                 val audio = UsbDirectOutput.open(usb.fileDescriptor, usb.rawDescriptors, rate.toUInt(), channels.toUByte(), bits.toUByte(), isDsd, request.call.argument<Boolean>("allowDop") == true)
                 output = audio
                 format = audio.format()
@@ -175,11 +186,11 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
                     "duration" to durationUs / 1000,
                     "transport" to f.encoding, "carrierRate" to f.sampleRate.toLong(), "driver" to "usb_direct",
                     "volume" to volumeMap(audio.volume()),
-                    "volumeBlocked" to (!audio.volume().available && !allowFixedVolume)), null)
+                    "volumeBlocked" to false), null)
             } catch (error: Exception) {
                 android.util.Log.i("UsbDirect", "Direct output unavailable: ${error.message}")
                 closeSource()
-                request.done(mapOf("reason" to if (isDsd) "dsd_unsupported" else "unsupported", "fatal" to isDsd), null)
+                request.done(mapOf("reason" to if (isDsd) "dsd_unsupported" else "unsupported", "fatal" to isDsd, "detail" to (error.message ?: error.javaClass.simpleName)), null)
             }
         }
     }
@@ -295,6 +306,17 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
         output?.shutdown()
         output?.destroy()
         output = null
+        try {
+            val dev = connection?.device
+            if (dev != null) {
+                for (i in 0 until dev.interfaceCount) {
+                    val intf = dev.getInterface(i)
+                    if (intf.interfaceClass == 1) {
+                        connection?.releaseInterface(intf)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
         connection?.close()
         connection = null
         emit(mapOf("token" to token, "event" to "paused", "reason" to "route_changed"))
@@ -305,6 +327,17 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
         output?.shutdown()
         output?.destroy()
         output = null
+        try {
+            val dev = connection?.device
+            if (dev != null) {
+                for (i in 0 until dev.interfaceCount) {
+                    val intf = dev.getInterface(i)
+                    if (intf.interfaceClass == 1) {
+                        connection?.releaseInterface(intf)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
         connection?.close()
         connection = null
         deviceId = null

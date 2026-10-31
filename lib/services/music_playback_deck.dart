@@ -56,6 +56,7 @@ Future<void> setUsbHardwareVolume(double fraction) async {
 class UsbAudioStatus {
   const UsbAudioStatus({
     this.reason = 'idle',
+    this.detail,
     this.device,
     this.sampleRate,
     this.bitDepth,
@@ -64,6 +65,7 @@ class UsbAudioStatus {
   });
 
   final String reason;
+  final String? detail;
   final String? device;
   final int? sampleRate;
   final int? bitDepth;
@@ -359,10 +361,11 @@ class AudioplayersPlaybackDeck implements PlaybackDeck {
           _durations.add(_duration!);
           return;
         }
+        final detail = response?['detail'] as String?;
         usbAudioStatus.value = UsbAudioStatus(
           reason: response?['reason'] as String? ?? 'unsupported',
+          detail: detail,
         );
-        final detail = response?['detail'] as String?;
         if (detail != null && detail.isNotEmpty) {
           _log.w('Native output ${usbAudioStatus.value.reason}: $detail');
         }

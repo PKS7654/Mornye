@@ -529,7 +529,13 @@ class _AudioFacts {
         l10n.audioInfoBitPerfect,
         _bitPerfect
             ? l10n.audioInfoBitPerfectActive
-            : l10n.audioInfoBitPerfectNo,
+            : [
+                l10n.audioInfoBitPerfectNo,
+                if (usb.detail != null && usb.detail!.isNotEmpty)
+                  '(${usb.detail})'
+                else if (usb.reason.isNotEmpty && usb.reason != 'active' && usb.reason != 'idle')
+                  '(${usb.reason})',
+              ].join(' '),
         emphasis: _bitPerfect,
       ),
     ];

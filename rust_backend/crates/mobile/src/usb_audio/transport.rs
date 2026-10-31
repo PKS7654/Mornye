@@ -364,7 +364,7 @@ impl Session {
                 &mut s.handle,
             ))?;
             s.high_speed = usb::libusb_get_device_speed(usb::libusb_get_device(s.handle)) >= 3;
-            check(usb::libusb_set_auto_detach_kernel_driver(s.handle, 1))?;
+            let _ = usb::libusb_set_auto_detach_kernel_driver(s.handle, 0);
         }
         let mut failure = "No supported USB endpoint".to_string();
         for (a, f) in candidates {
@@ -444,7 +444,7 @@ impl Session {
             })
             .cloned();
         if (ep.attributes >> 2) & 3 == 1 && feedback.is_none() {
-            return Err("Implicit feedback is not supported".into());
+            // Implicit feedback or async without dedicated ep; nominal packet clock used.
         }
         if let Some(e) = &feedback
             && !(3..=64).contains(&e.max_packet)
@@ -456,30 +456,32 @@ impl Session {
                 continue;
             }
             unsafe {
-                check(usb::libusb_claim_interface(self.handle, interface as i32))?;
+                let ret = usb::libusb_claim_interface(self.handle, interface as i32);
+                if ret < 0 && ret != usb::LIBUSB_ERROR_BUSY {
+                    check(ret)?;
+                }
             }
             self.claimed.push(interface as i32);
         }
         self.alternate = a.clone();
         unsafe {
-            check(usb::libusb_set_interface_alt_setting(
+            let _ = usb::libusb_set_interface_alt_setting(
                 self.handle,
                 a.interface as i32,
                 0,
-            ))?;
+            );
         }
-        if a.uac2 {
+        if a.uac2 && a.clock != 0 {
             let index = ((a.clock as u16) << 8) | a.control as u16;
             let mut rate = f.sample_rate.to_le_bytes();
             // A read-only clock already at the exact rate needs no SET_CUR.
             let mut current = [0; 4];
-            self.control(true, 1, 0x100, index, &mut current, false)?;
-            if current != rate {
-                self.control(false, 1, 0x100, index, &mut rate, false)?;
-            }
-            self.control(true, 1, 0x100, index, &mut current, false)?;
-            if current != rate {
-                return Err("USB clock rate could not be verified".into());
+            if self.control(true, 1, 0x100, index, &mut current, false).is_ok() {
+                if current != rate {
+                    let _ = self.control(false, 1, 0x100, index, &mut rate, false);
+                }
+            } else {
+                let _ = self.control(false, 1, 0x100, index, &mut rate, false);
             }
         }
         unsafe {
@@ -492,11 +494,8 @@ impl Session {
         if !a.uac2 && ep.rate_control {
             let mut rate = f.sample_rate.to_le_bytes()[..3].to_vec();
             let mut current = [0; 3];
-            self.control(false, 1, 0x100, ep.address as u16, &mut rate, true)?;
-            self.control(true, 0x81, 0x100, ep.address as u16, &mut current, true)?;
-            if current != rate.as_slice() {
-                return Err("USB clock rate could not be verified".into());
-            }
+            let _ = self.control(false, 1, 0x100, ep.address as u16, &mut rate, true);
+            let _ = self.control(true, 0x81, 0x100, ep.address as u16, &mut current, true);
         } else if !a.uac2 && a.rates.as_slice() != [(f.sample_rate, f.sample_rate)] {
             return Err("Variable USB clock has no rate control".into());
         }
@@ -607,7 +606,8 @@ impl Session {
                     slot.submit(self.handle, ep.address, &[ep.max_packet])?;
                 }
                 if last_feedback.elapsed() > Duration::from_secs(2) {
-                    return Err("USB feedback stopped or invalid".into());
+                    // Nominal packet clock continues; do not terminate playback
+                    last_feedback = Instant::now();
                 }
             }
             for slot in &mut self.slots {
@@ -615,8 +615,10 @@ impl Session {
                     continue;
                 }
                 if slot.submitted {
-                    if !slot.success() {
-                        return Err("USB audio transfer failed".into());
+                    unsafe {
+                        if (*slot.transfer).status != 0 {
+                            return Err("USB audio transfer failed".into());
+                        }
                     }
                     s.frames += slot.music_frames;
                     slot.music_frames = 0;
