@@ -457,7 +457,7 @@ impl Session {
             }
             unsafe {
                 let ret = usb::libusb_claim_interface(self.handle, interface as i32);
-                if ret < 0 && ret != usb::LIBUSB_ERROR_BUSY {
+                if ret < 0 && ret != usb::constants::LIBUSB_ERROR_BUSY {
                     check(ret)?;
                 }
             }
