@@ -157,7 +157,7 @@ pub fn parse(bytes: &[u8]) -> Result<Device, String> {
     }
     for a in &mut device.alternates {
         a.clock = clocks.get(&(a.control, a.terminal)).copied().unwrap_or_else(|| {
-            clocks.iter().find(|(&(c, _), _)| c == a.control).map(|(_, &clk)| clk).unwrap_or(0)
+            clocks.iter().find(|(k, _)| k.0 == a.control).map(|(_, v)| *v).unwrap_or(0)
         });
     }
     Ok(device)
