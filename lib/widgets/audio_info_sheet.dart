@@ -628,7 +628,12 @@ class _AudioFacts {
         ),
       if (route?.headTracking == true)
         _Fact(l10n.audioInfoHeadTracking, l10n.audioInfoSupported),
-      if (route?.fixedVolume == true || direct)
+      if (direct && usbHardwareVolume.value?.available == true)
+        _Fact(
+          l10n.nowPlayingVolume,
+          '${(usbHardwareVolume.value!.fraction * 100).round()}% (${usbHardwareVolume.value!.currentDb.toStringAsFixed(1)} dB)',
+        )
+      else if (route?.fixedVolume == true || direct)
         _Fact(l10n.nowPlayingVolume, l10n.audioInfoFixedVolume)
       else if (volume != null)
         _Fact(

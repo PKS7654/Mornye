@@ -8,6 +8,8 @@ import 'package:mornye/utils/desktop_platform.dart';
 import 'package:mornye/utils/logger.dart';
 import 'package:mornye/services/playback_deck.dart';
 import 'package:mornye/services/playback_equalizer.dart';
+import 'package:mornye/services/system_volume_service.dart';
+import 'package:volume_controller/volume_controller.dart';
 
 final _log = AppLogger('AudioOutput');
 
@@ -43,10 +45,13 @@ class UsbVolumeState {
 Future<void> setUsbHardwareVolume(double fraction) async {
   final state = usbHardwareVolume.value;
   if (state == null || !state.available) return;
+  final targetDb =
+      state.minDb + fraction.clamp(0, 1) * (state.maxDb - state.minDb);
+  if ((targetDb - state.currentDb).abs() < 0.1) return;
   final result = await AudioplayersPlaybackDeck._channel
       .invokeMapMethod<String, dynamic>('volume', {
         'token': state.token,
-        'db': state.minDb + fraction.clamp(0, 1) * (state.maxDb - state.minDb),
+        'db': targetDb,
       });
   if (result != null && usbHardwareVolume.value?.token == state.token) {
     usbHardwareVolume.value = UsbVolumeState(result);
@@ -219,6 +224,7 @@ class AudioplayersPlaybackDeck implements PlaybackDeck {
   double _gain = 1;
   PlaybackDeckState _directState = PlaybackDeckState.stopped;
   UsbAudioStatus _preparedStatus = const UsbAudioStatus();
+  StreamSubscription<double>? _directVolumeSubscription;
 
   @override
   bool get isDirect => _direct;
@@ -343,6 +349,22 @@ class AudioplayersPlaybackDeck implements PlaybackDeck {
               ? UsbVolumeState(volume)
               : null;
           _direct = true;
+          _directVolumeSubscription?.cancel();
+          _directVolumeSubscription = SystemVolumeService.instance.changes
+              .listen((volume) {
+            if (_direct && !_disposed) {
+              unawaited(setUsbHardwareVolume(volume));
+            }
+          });
+          if (!isDesktopPlatform) {
+            unawaited(
+              VolumeController.instance.getVolume().then((currentVol) {
+                if (_direct && !_disposed) {
+                  return setUsbHardwareVolume(currentVol);
+                }
+              }).catchError((_) {}),
+            );
+          }
           _directState = PlaybackDeckState.stopped;
           _duration = Duration(
             milliseconds: (response?['duration'] as num?)?.toInt() ?? 0,
@@ -538,6 +560,8 @@ class AudioplayersPlaybackDeck implements PlaybackDeck {
   @override
   Future<void> stop() async {
     _timer?.cancel();
+    _directVolumeSubscription?.cancel();
+    _directVolumeSubscription = null;
     if (_direct || _preparing) {
       _token = ++_nextToken;
       _preparing = false;
@@ -560,6 +584,8 @@ class AudioplayersPlaybackDeck implements PlaybackDeck {
     reportEqualizerError(_ordinary.playerId, null);
     await stop();
     _disposed = true;
+    await _directVolumeSubscription?.cancel();
+    _directVolumeSubscription = null;
     await _nativeSubscription?.cancel();
     await _positionSubscription?.cancel();
     for (final subscription in _subscriptions) {

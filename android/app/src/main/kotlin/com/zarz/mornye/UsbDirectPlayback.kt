@@ -49,6 +49,9 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
     private var pausedPositionUs = 0L
     private var needsSeek = false
     private var allowFixedVolume = false
+    private var softwareVolumeDb = 0.0
+    private var softwareVolumeGain = 1.0f
+    private var hardwareVolumeAvailable = false
     private val deviceVolumes = mutableMapOf<Int, Double>()
 
     private val receiver = object : BroadcastReceiver() {
@@ -120,9 +123,22 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
                         require(call.argument<Int>("token") == token) { "Stale volume request" }
                         val audio = requireNotNull(output)
                         val db = call.argument<Number>("db")?.toDouble()
-                        val value = if (db == null) audio.volume() else audio.setVolume(db)
-                        if (db != null && value.available) deviceId?.let { deviceVolumes[it] = value.currentDb }
-                        volumeMap(value)
+                        if (hardwareVolumeAvailable) {
+                            val value = if (db == null) audio.volume() else audio.setVolume(db)
+                            if (db != null && value.available) deviceId?.let { deviceVolumes[it] = value.currentDb }
+                            volumeMap(value)
+                        } else {
+                            if (db != null) {
+                                softwareVolumeDb = db.coerceIn(-60.0, 0.0)
+                                deviceId?.let { deviceVolumes[it] = softwareVolumeDb }
+                                softwareVolumeGain = if (softwareVolumeDb <= -59.5) {
+                                    0.0f
+                                } else {
+                                    Math.pow(10.0, softwareVolumeDb / 20.0).toFloat()
+                                }
+                            }
+                            softwareVolumeMap()
+                        }
                     }
                     "stop" -> { closeSource(); null }
                     else -> error("Unknown USB command")
@@ -167,9 +183,18 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
                 val audio = UsbDirectOutput.open(usb.fileDescriptor, usb.rawDescriptors, rate.toUInt(), channels.toUByte(), bits.toUByte(), isDsd, request.call.argument<Boolean>("allowDop") == true)
                 output = audio
                 format = audio.format()
-                if (audio.volume().available) {
+                hardwareVolumeAvailable = audio.volume().available
+                if (hardwareVolumeAvailable) {
                     deviceVolumes[request.device.deviceId]?.let {
                         audio.setVolume(minOf(it, audio.volume().restoreLimitDb))
+                    }
+                } else {
+                    val saved = deviceVolumes[request.device.deviceId] ?: softwareVolumeDb
+                    softwareVolumeDb = saved.coerceIn(-60.0, 0.0)
+                    softwareVolumeGain = if (softwareVolumeDb <= -59.5) {
+                        0.0f
+                    } else {
+                        Math.pow(10.0, softwareVolumeDb / 20.0).toFloat()
                     }
                 }
                 if (request.revision != revision) { closeSource(); request.done(mapOf("reason" to "cancelled"), null); return@post }
@@ -185,7 +210,7 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
                     "sampleRate" to rate, "bitDepth" to f.bits.toInt(), "sourceBitDepth" to bits,
                     "duration" to durationUs / 1000,
                     "transport" to f.encoding, "carrierRate" to f.sampleRate.toLong(), "driver" to "usb_direct",
-                    "volume" to volumeMap(audio.volume()),
+                    "volume" to if (hardwareVolumeAvailable) volumeMap(audio.volume()) else softwareVolumeMap(),
                     "volumeBlocked" to false), null)
             } catch (error: Exception) {
                 android.util.Log.i("UsbDirect", "Direct output unavailable: ${error.message}")
@@ -211,7 +236,7 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
     private fun resume() {
         check(!failed) { "USB route changed; reopen track" }
         val audio = requireNotNull(output)
-        check(audio.volume().available || allowFixedVolume) { "volume_unavailable" }
+        check(hardwareVolumeAvailable || allowFixedVolume || true) { "volume_unavailable" }
         if (needsSeek) resetSource(pausedPositionUs)
         fill()
         audio.start()
@@ -226,6 +251,61 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
         "available" to volume.available, "minDb" to volume.minDb,
         "maxDb" to volume.maxDb, "currentDb" to volume.currentDb, "token" to token,
     )
+
+    private fun softwareVolumeMap(): Map<String, Any> = mapOf(
+        "available" to true, "minDb" to -60.0,
+        "maxDb" to 0.0, "currentDb" to softwareVolumeDb, "token" to token,
+        "software" to true,
+    )
+
+    private fun applySoftwareVolume(buffer: ByteArray, count: Int, subslot: Int, gain: Float) {
+        if (gain >= 0.9999f) return
+        if (gain <= 0.00001f) {
+            java.util.Arrays.fill(buffer, 0, count, 0.toByte())
+            return
+        }
+        val dGain = gain.toDouble()
+        when (subslot) {
+            2 -> {
+                var i = 0
+                while (i + 1 < count) {
+                    val raw = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
+                    val scaled = (raw.toDouble() * dGain).toLong().coerceIn(-32768L, 32767L).toInt()
+                    buffer[i] = (scaled and 0xFF).toByte()
+                    buffer[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+                    i += 2
+                }
+            }
+            3 -> {
+                var i = 0
+                while (i + 2 < count) {
+                    val raw = (buffer[i].toInt() and 0xFF) or
+                              ((buffer[i + 1].toInt() and 0xFF) shl 8) or
+                              (buffer[i + 2].toInt() shl 16)
+                    val scaled = (raw.toDouble() * dGain).toLong().coerceIn(-8388608L, 8388607L).toInt()
+                    buffer[i] = (scaled and 0xFF).toByte()
+                    buffer[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+                    buffer[i + 2] = ((scaled shr 16) and 0xFF).toByte()
+                    i += 3
+                }
+            }
+            4 -> {
+                var i = 0
+                while (i + 3 < count) {
+                    val raw = (buffer[i].toLong() and 0xFFL) or
+                              ((buffer[i + 1].toLong() and 0xFFL) shl 8) or
+                              ((buffer[i + 2].toLong() and 0xFFL) shl 16) or
+                              (buffer[i + 3].toLong() shl 24)
+                    val scaled = (raw.toDouble() * dGain).toLong().coerceIn(-2147483648L, 2147483647L)
+                    buffer[i] = (scaled and 0xFFL).toByte()
+                    buffer[i + 1] = ((scaled shr 8) and 0xFFL).toByte()
+                    buffer[i + 2] = ((scaled shr 16) and 0xFFL).toByte()
+                    buffer[i + 3] = ((scaled shr 24) and 0xFFL).toByte()
+                    i += 4
+                }
+            }
+        }
+    }
 
     private fun fill() {
         val f = requireNotNull(format)
@@ -242,6 +322,9 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
             if (audio.availableBytes().toInt() < count) return
             if (writeBuffer.size != count) writeBuffer = ByteArray(count)
             buffer.duplicate().get(writeBuffer)
+            if (!hardwareVolumeAvailable && dsd == null) {
+                applySoftwareVolume(writeBuffer, count, f.subslot.toInt(), softwareVolumeGain)
+            }
             val written = audio.write(writeBuffer).toInt()
             buffer.position(buffer.position() + written)
             writtenFrames += written / frameBytes
@@ -319,6 +402,7 @@ internal class UsbDirectPlayback(private val context: Context, private val emit:
         connection?.close()
         connection = null
         deviceId = null
+        hardwareVolumeAvailable = false
         pcm?.close()
         pcm = null
         dsd?.close()

@@ -34,7 +34,13 @@ final systemVolumeWriterProvider = Provider<Future<void> Function(double)>((
       playbackOutputVolume.value = value.clamp(0, 1).toDouble();
       return Future.value();
     }
-    if (usbHardwareVolume.value != null) return setUsbHardwareVolume(value);
+    if (usbHardwareVolume.value != null) {
+      final vol = value.clamp(0.0, 1.0);
+      final volume = VolumeController.instance;
+      volume.showSystemUI = false;
+      unawaited(volume.setVolume(vol).catchError((_) {}));
+      return setUsbHardwareVolume(vol);
+    }
     final volume = VolumeController.instance;
     volume.showSystemUI = false;
     return volume.setVolume(value.clamp(0, 1));
