@@ -65,7 +65,8 @@ pub fn parse(bytes: &[u8]) -> Result<Device, String> {
             2 => {
                 configurations += 1;
                 if configurations > 1 {
-                    return Err("Multiple USB configurations are not supported".into());
+                    // Primary configuration (Configuration 1) is already parsed; ignore secondary configurations.
+                    break;
                 }
             }
             1 if length >= 18 => {
@@ -155,7 +156,9 @@ pub fn parse(bytes: &[u8]) -> Result<Device, String> {
         device.alternates.push(a);
     }
     for a in &mut device.alternates {
-        a.clock = clocks.get(&(a.control, a.terminal)).copied().unwrap_or(0);
+        a.clock = clocks.get(&(a.control, a.terminal)).copied().unwrap_or_else(|| {
+            clocks.iter().find(|(&(c, _), _)| c == a.control).map(|(_, &clk)| clk).unwrap_or(0)
+        });
     }
     Ok(device)
 }
@@ -202,7 +205,7 @@ pub fn formats(
             }
             (rate, "pcm", a.bits)
         };
-        if wire_rate == 0 || a.bits > a.subslot * 8 || (a.uac2 && a.clock == 0) {
+        if wire_rate == 0 || a.bits > a.subslot * 8 {
             continue;
         }
         if !a.uac2
