@@ -34,7 +34,10 @@ import 'package:mornye/services/platform_bridge.dart';
 import 'package:mornye/services/download_request_payload.dart';
 import 'package:mornye/services/folder_path_template.dart';
 import 'package:mornye/services/download_motion_artwork_source.dart';
-import 'package:mornye/services/ffmpeg_service.dart';
+import 'package:mornye/services/ffmpeg_conversion.dart';
+import 'package:mornye/services/ffmpeg_decryption.dart';
+import 'package:mornye/services/ffmpeg_models.dart';
+import 'package:mornye/services/ffmpeg_probe.dart';
 import 'package:mornye/services/hires_check_service.dart';
 import 'package:mornye/services/replaygain_service.dart';
 import 'package:mornye/services/album_replaygain_readiness.dart';
@@ -46,9 +49,10 @@ import 'package:mornye/utils/desktop_platform.dart';
 import 'package:mornye/utils/file_access.dart';
 import 'package:mornye/utils/string_utils.dart';
 import 'package:mornye/utils/audio_format_utils.dart';
+import 'package:mornye/utils/audio_conversion_utils.dart';
 import 'package:mornye/utils/int_utils.dart';
 import 'package:mornye/utils/path_match_keys.dart';
-import 'package:mornye/utils/extension_auth_launcher.dart';
+import 'package:mornye/controllers/extension_auth_launcher.dart';
 import 'package:mornye/utils/download_error_type.dart';
 import 'package:mornye/utils/lyrics_metadata_helper.dart';
 import 'package:mornye/utils/progress_stream_poller.dart';
@@ -105,6 +109,16 @@ final _explicitQualityFilenameTokenPattern = RegExp(
   r'\{(?:quality|quality_variant)\}',
   caseSensitive: false,
 );
+
+extension on DownloadItem {
+  DownloadItem resetToQueued() => copyWith(
+    status: DownloadStatus.queued,
+    progress: 0,
+    speedMBps: 0,
+    bytesReceived: 0,
+    bytesTotal: 0,
+  );
+}
 
 class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
   late final _queuePersistence = DownloadQueuePersistence(
@@ -187,6 +201,7 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
   bool _networkPausedByWifiOnly = false;
   final Set<String> _locallyCancelledItemIds = {};
   final Set<String> _pausePendingItemIds = {};
+  final Map<String, Future<void>> _nativeCancelRequests = {};
   final DownloadVerificationRetryGuard _verificationRetryGuard =
       DownloadVerificationRetryGuard();
   final DownloadVerificationWaitCoordinator _verificationWaitCoordinator =
@@ -369,13 +384,7 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
             if (!requeueItemIds.contains(item.id)) {
               return item;
             }
-            return item.copyWith(
-              status: DownloadStatus.queued,
-              progress: 0,
-              speedMBps: 0,
-              bytesReceived: 0,
-              bytesTotal: 0,
-            );
+            return item.resetToQueued();
           })
           .toList(growable: false);
       if (state.isProcessing) {
@@ -600,6 +609,12 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
       autoConvertBitrate: normalizeAutoConvertBitrate(
         settings.autoConvertBitrate,
       ),
+      autoConvertMaxBitDepth: normalizeAutoConvertBitDepth(
+        settings.autoConvertMaxBitDepth,
+      ),
+      autoConvertMaxSampleRate: normalizeAutoConvertSampleRate(
+        settings.autoConvertMaxSampleRate,
+      ),
       trackNumber: normalizedTrackNumber,
       playlistPosition: _validPlaylistPosition(item),
       discNumber: normalizedDiscNumber,
@@ -728,7 +743,7 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
     final id = _newQueueItemId(track, takenIds: takenIds);
     final item = DownloadItem(
       id: id,
-      track: track,
+      track: queuedDownloadTrack(track),
       service: _normalizeQueuedService(service),
       createdAt: DateTime.now(),
       qualityOverride: qualityOverride,
@@ -762,7 +777,7 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
       newItems.add(
         DownloadItem(
           id: id,
-          track: track,
+          track: queuedDownloadTrack(track),
           service: normalizedService,
           createdAt: DateTime.now(),
           preserveQualityVariant: settings.allowQualityVariants,
@@ -829,7 +844,7 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
         newItems.add(
           DownloadItem(
             id: id,
-            track: track,
+            track: queuedDownloadTrack(track),
             service: normalizedService ??= _normalizeQueuedService(service),
             createdAt: DateTime.now(),
             qualityOverride: qualityOverride,
@@ -954,21 +969,18 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
     _saveQueueToStorage();
   }
 
-  void updateProgress(String id, double progress, {double? speedMBps}) {
-    final item = state.lookup.byItemId[id];
-    if (item == null) return;
-    if (item.status == DownloadStatus.skipped ||
-        item.status == DownloadStatus.completed ||
-        item.status == DownloadStatus.failed) {
-      return;
-    }
-    updateItemStatus(
-      id,
-      DownloadStatus.downloading,
-      progress: progress,
-      speedMBps: speedMBps,
-    );
-  }
+  @visibleForTesting
+  String relativeOutputDirFor(
+    Track track,
+    AppSettings settings, {
+    String? customFolderPath,
+    String? playlistName,
+  }) => _buildRelativeOutputDir(
+    track,
+    settings,
+    customFolderPath: customFolderPath,
+    playlistName: playlistName,
+  );
 
   DownloadItem? _findItemById(String id) {
     return state.lookup.byItemId[id];
@@ -991,13 +1003,7 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
               item.status == DownloadStatus.skipped) {
             return item;
           }
-          return item.copyWith(
-            status: DownloadStatus.queued,
-            progress: 0,
-            speedMBps: 0,
-            bytesReceived: 0,
-            bytesTotal: 0,
-          );
+          return item.resetToQueued();
         })
         .toList(growable: false);
 
@@ -1012,8 +1018,36 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
 
   void _requestNativeCancel(String id) {
     _verificationWaitCoordinator.cancelItem(id);
-    PlatformBridge.cancelDownload(id).catchError((_) {});
+    final previous = _nativeCancelRequests[id] ?? Future<void>.value();
+    final request = previous
+        .then((_) => PlatformBridge.cancelDownload(id))
+        .catchError((Object error) => _log.w('Could not cancel $id: $error'));
+    _nativeCancelRequests[id] = request;
+    unawaited(
+      request.whenComplete(() {
+        if (identical(_nativeCancelRequests[id], request)) {
+          _nativeCancelRequests.remove(id);
+        }
+      }),
+    );
     PlatformBridge.clearItemProgress(id).catchError((_) {});
+  }
+
+  Future<void> _finishPausedDownload(String id) async {
+    try {
+      final cancellation = _nativeCancelRequests[id];
+      if (cancellation != null) await cancellation;
+      // Pausing before the backend acquires a lease, or after it releases
+      // one, leaves an idle cancel flag. Reset it only after this attempt and
+      // its cancellation have finished, before the scheduler can restart it.
+      if (_findItemById(id) != null && !_isLocallyCancelled(id)) {
+        await PlatformBridge.resetDownloadCancel(id);
+      }
+    } catch (error) {
+      _log.w('Could not reset paused download $id: $error');
+    } finally {
+      _pausePendingItemIds.remove(id);
+    }
   }
 
   void cancelItem(String id) {
@@ -1289,12 +1323,7 @@ class DownloadQueueNotifier extends Notifier<DownloadQueueState> {
           }
           _verificationRetryGuard.clearItem(item.id);
           _rateLimitRetriedItemIds.remove(item.id);
-          return item.copyWith(
-            status: DownloadStatus.queued,
-            progress: 0,
-            speedMBps: 0,
-            bytesReceived: 0,
-            bytesTotal: 0,
+          return item.resetToQueued().copyWith(
             error: null,
             errorType: null,
             filePath: null,
